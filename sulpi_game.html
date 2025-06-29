@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>절주특공대 (Sulpi Game)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>
+  <style>
+    html, body { height:100%; margin:0; padding:0; }
+    body { background: #fff; width: 100vw; height: 100vh; overflow: hidden; position: relative; }
+    #game { display: block; background: #fff; touch-action: none; position: absolute; left: 0; top: 0; }
+    #copyright {
+      font-size:5px; color:#888;
+      position:fixed; left:5px; bottom:5px; right:auto;
+      text-align:left; line-height:1.2; z-index:2;
+      pointer-events:none; max-width:50vw;
+    }
+    #joystick-base {
+      position:fixed; left:50%; bottom:20px; transform:translateX(-50%);
+      width:156px; height:156px; border-radius:50%; background:rgba(200,200,200,0.4); z-index:20; touch-action:none; user-select:none;
+      display:flex; align-items:center; justify-content:center; pointer-events:auto;
+    }
+    #joystick-knob {
+      width:78px; height:78px; border-radius:50%; background:rgba(100,100,100,0.7);
+      position:absolute; left:39px; top:39px; touch-action:none; user-select:none;
+      transition:left 0.05s, top 0.05s;
+    }
+    @media (max-width: 600px) {
+      #copyright { font-size:4px; }
+      #joystick-base { width:109px; height:109px; }
+      #joystick-knob { width:54px; height:54px; left:27px; top:27px; }
+    }
+  </style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="copyright">
+  Cipher2 by Kevin MacLeod | incompetech.com<br>
+  Music promoted by chosic.com/free-music/all/<br>
+  Creative Commons CC BY 3.0<br>
+  https://creativecommons.org/licenses/by/3.0/
+</div>
+<div id="joystick-base">
+  <div id="joystick-knob"></div>
+</div>
+<script>
+// === BGM: 사용자 상호작용 후 재생 ===
+const bgm = new Audio('bgm.mp3');
+bgm.loop = true;
+bgm.volume = 0.5;
+let bgmStarted = false;
+window.addEventListener('pointerdown', () => {
+  if (!bgmStarted) { bgm.play().catch(()=>{}); bgmStarted = true; }
+});
+
+// === 이미지 로딩 ===
+const backgroundImg = new Image(); backgroundImg.src = "background.png";
+const sojuImg = new Image(); sojuImg.src = "soju.png";
+const beerImg = new Image(); beerImg.src = "beer.png";
+const heartImg = new Image(); heartImg.src = "heart.png";
+const bombImg = new Image(); bombImg.src = "bomb.png";
+const shieldImg = new Image(); shieldImg.src = "shield.png";
+const ladybugImg = new Image(); ladybugImg.src = "ladybug.png";
+const bomb2Img = new Image(); bomb2Img.src = "bomb2.png";
+
+// === bomb2.png 애니메이션 상태 ===
+let bomb2Anim = { time: null, duration: 1500, active: false };
+
+// === 기본 게임 세팅 ===
+const canvas = document.getElementById('game');
+let WIDTH = 0, HEIGHT = 0;
+function resizeCanvas() {
+  let ww = window.innerWidth, wh = window.innerHeight;
+  let targetRatio = 9/16;
+  let cw, ch;
+  if (ww/wh > targetRatio) { ch = wh; cw = Math.floor(ch * targetRatio); }
+  else { cw = ww; ch = Math.floor(cw / targetRatio); }
+  canvas.width = cw; canvas.height = ch;
+  WIDTH = cw; HEIGHT = ch;
+  canvas.style.width = cw + "px";
+  canvas.style.height = ch + "px";
+  canvas.style.left = ((ww - cw) / 2) + "px";
+  canvas.style.top = ((wh - ch) / 2) + "px";
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+const ctx = canvas.getContext('2d');
+const BASE_WIDTH = 360, BASE_HEIGHT = 640;
+function scaleX(x) { return x * WIDTH / BASE_WIDTH; }
+function scaleY(y) { return y * HEIGHT / BASE_HEIGHT; }
+function scaleV(v) { return v * ((WIDTH+HEIGHT)/2) / ((BASE_WIDTH+BASE_HEIGHT)/2); }
+
+const CYAN = "#0ff", RED = "#f00", GOLD = "#ffd700", BLACK = "#000";
+let ladybug = { x: scaleX(BASE_WIDTH/2-20), y: scaleY(BASE_HEIGHT-80), size:scaleV(40 * 2/3), speed:scaleV(5) };
+let enemies = [], items = [];
+let sobriety = 0, shield = false, shieldTimer = 0, lives = 3;
+
+// 적 생성 관련 변수
+const spawnChance_init = 36, minSpawnChance = 5, spawnDecrease = 0.0055;
+
+// 아이템 생성 확률 조정
+const itemSpawnRateInit = 1/360, itemSpawnRateTarget = 1/180;
+const itemSpawnRateIncrease = (itemSpawnRateTarget - itemSpawnRateInit) / 4000;
+
+let gameOver = false, keys = {};
+let bombEffect = null;
+
+let shakeEffect = { duration: 300, magnitude: 10, startTime: null };
+function startShake() { shakeEffect.startTime = Date.now(); }
+function getShakeOffset() {
+  if (shakeEffect.startTime === null) return 0;
+  let elapsed = Date.now() - shakeEffect.startTime;
+  if (elapsed > shakeEffect.duration) { shakeEffect.startTime = null; return 0; }
+  let fraction = elapsed / shakeEffect.duration;
+  let magnitude = shakeEffect.magnitude * (1 - fraction);
+  return magnitude * Math.sin(elapsed * 0.25);
+}
+
+function resetLadybug() {
+  ladybug.x = scaleX(BASE_WIDTH/2-20);
+  ladybug.y = scaleY(BASE_HEIGHT-80);
+  ladybug.size = scaleV(40 * 2/3);
+  ladybug.speed = scaleV(5);
+}
+window.addEventListener('resize', resetLadybug);
+
+// 캐릭터 이미지 + Glow(쉴드) 효과
+function drawLadybug() {
+  ctx.save();
+  if (shield) {
+    ctx.shadowColor = CYAN;
+    ctx.shadowBlur = scaleV(16);
+  }
+  if (ladybugImg.complete && ladybugImg.naturalWidth > 0) {
+    ctx.drawImage(ladybugImg, ladybug.x, ladybug.y, ladybug.size, ladybug.size);
+  } else {
+    ctx.fillStyle = RED;
+    ctx.beginPath();
+    ctx.ellipse(ladybug.x+ladybug.size/2, ladybug.y+ladybug.size/2, ladybug.size/2, ladybug.size/2, 0, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+function drawHeart(x, y, size, color) {
+  ctx.save();
+  if (heartImg.complete && heartImg.naturalWidth > 0) ctx.drawImage(heartImg, x, y, size, size);
+  else {
+    ctx.fillStyle = color;
+    let r = size/3;
+    ctx.beginPath();
+    ctx.arc(x+r, y+r, r, Math.PI, 0);
+    ctx.arc(x+2*r, y+r, r, Math.PI, 0);
+    ctx.lineTo(x+size/2, y+size);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+}
+function drawEnemy(e) {
+  ctx.save();
+  if (e.kind === 'soju' && sojuImg.complete) ctx.drawImage(sojuImg, e.x, e.y, e.size, e.size * 1.5);
+  else if (e.kind === 'beer' && beerImg.complete) ctx.drawImage(beerImg, e.x, e.y, e.size, e.size * 1.5);
+  else {
+    if (e.kind === 'soju') {
+      ctx.fillStyle = "#0b4";
+      ctx.fillRect(e.x+scaleV(8), e.y+scaleV(10), scaleV(14), scaleV(18));
+      ctx.fillStyle = "#cfc";
+      ctx.fillRect(e.x+scaleV(11), e.y+scaleV(4), scaleV(8), scaleV(8));
+    } else {
+      ctx.fillStyle = GOLD;
+      ctx.fillRect(e.x+scaleV(8), e.y+scaleV(12), scaleV(14), scaleV(16));
+      ctx.fillStyle = "#fff";
+      ctx.beginPath();
+      ctx.ellipse(e.x+scaleV(15), e.y+scaleV(11), scaleV(7), scaleV(5), 0, 0, Math.PI*2);
+      ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+function drawItem(it) {
+  ctx.save();
+  if (it.type === 'heal' && heartImg.complete) ctx.drawImage(heartImg, it.x, it.y, it.size, it.size);
+  else if (it.type === 'bomb' && bombImg.complete) ctx.drawImage(bombImg, it.x, it.y, it.size, it.size);
+  else if (it.type === 'shield' && shieldImg.complete) ctx.drawImage(shieldImg, it.x, it.y, it.size, it.size);
+  else {
+    let color = it.type === 'shield' ? "#0c0" : GOLD;
+    ctx.beginPath();
+    ctx.arc(it.x+it.size/2, it.y+it.size/2, it.size/2, 0, Math.PI*2);
+    ctx.fillStyle = color;
+    ctx.fill();
+  }
+  ctx.restore();
+}
+function randItemType() {
+  let r = Math.random()*100;
+  return r < 60 ? 'shield' : r < 95 ? 'bomb' : 'heal';
+}
+function newEnemy() {
+  let kind = Math.random() < 0.5 ? 'soju' : 'beer';
+  let size = scaleV(30);
+  return { x: Math.random()*(WIDTH-size), y: -size, size, speed: scaleV(2+Math.random()), kind };
+}
+function newItem() {
+  let size = scaleV(25);
+  return { x: Math.random()*(WIDTH-size), y:-size, size, speed:scaleV(4), type:randItemType() };
+}
+function moveEnemies() {
+  for (let i=enemies.length-1; i>=0; --i) {
+    let e = enemies[i];
+    let dx = ladybug.x - e.x, dy = ladybug.y - e.y;
+    let dist = Math.hypot(dx, dy) || 1;
+    let steer = 0.1;
+    e.x += dx/dist * steer * e.speed;
+    e.y += e.speed*(1-steer) + dy/dist * steer * e.speed;
+    if (e.x < -e.size || e.x > WIDTH+e.size || e.y > HEIGHT+e.size) enemies.splice(i,1);
+  }
+}
+function moveItems() {
+  for (let i=items.length-1; i>=0; --i) {
+    let it = items[i];
+    it.y += it.speed;
+    if (it.y > HEIGHT) items.splice(i,1);
+  }
+}
+function checkCollisions() {
+  for (let i=enemies.length-1; i>=0; --i) {
+    let e = enemies[i];
+    if (Math.abs(ladybug.x - e.x) < scaleV(30) && Math.abs(ladybug.y - e.y) < scaleV(30)) {
+      if (shield) {
+        enemies.splice(i,1);
+        shield = false;
+      } else {
+        lives--;
+        enemies.splice(i,1);
+        if (lives <= 0) gameOver = true;
+      }
+    }
+  }
+  for (let i=items.length-1; i>=0; --i) {
+    let it = items[i];
+    if (Math.abs(ladybug.x - it.x) < scaleV(30) && Math.abs(ladybug.y - it.y) < scaleV(30)) {
+      if (it.type === 'shield') {
+        shield = true;
+        shieldTimer = Date.now();
+        items.splice(i,1);
+      } else if (it.type === 'bomb') {
+        bomb2Anim.time = Date.now();
+        bomb2Anim.active = true;
+        bombEffect = {
+          time: bomb2Anim.time,
+          duration: 1500,
+          enemies: enemies.map(e => ({
+            ...e,
+            crackX: e.x + (Math.random()-0.5)*scaleV(16),
+            crackY: e.y - scaleV(10) + (Math.random()-0.5)*scaleV(12)
+          }))
+        };
+        items.splice(i,1);
+        startShake();
+        enemies = []; // 폭탄 효과와 동시에 병 모두 제거
+        return;
+      } else if (it.type === 'heal') {
+        if (lives < 3) lives++;
+        items.splice(i,1);
+      }
+    }
+  }
+}
+
+// bomb2.png 애니메이션 (오른쪽 아래, 3배 크기, bombEffect와 동시에)
+function drawBomb2Anim() {
+  if (!bomb2Anim.active || !bomb2Img.complete || bomb2Img.naturalWidth === 0) return;
+  const now = Date.now();
+  const elapsed = now - bomb2Anim.time;
+  const duration = 1500;
+  if (elapsed > duration) {
+    bomb2Anim.active = false;
+    return;
+  }
+  const half = duration / 2;
+  let alpha = elapsed < half ? elapsed / half : (duration - elapsed) / half;
+  const size = WIDTH * 3 / 4;
+  const x = WIDTH - size - 20;
+  const y = HEIGHT - size - 20;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.drawImage(bomb2Img, x, y, size, size);
+  ctx.restore();
+}
+
+function drawBombEffect() {
+  if (!bombEffect) return;
+  const now = Date.now();
+  const elapsed = now - bombEffect.time;
+  const duration = bombEffect.duration || 1500;
+  if (elapsed > duration) {
+    bombEffect = null;
+    return;
+  }
+  const half = duration / 2;
+  let alpha = elapsed < half ? elapsed / half : (duration - elapsed) / half;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = "#000";
+  ctx.globalAlpha = 0.65 * alpha;
+  ctx.fillRect(0,0,WIDTH,HEIGHT);
+  ctx.globalAlpha = alpha;
+  ctx.font = `bold ${Math.floor(scaleV(60))}px sans-serif`;
+  ctx.fillStyle = "#fff";
+  ctx.textAlign = "center";
+  ctx.lineWidth = scaleV(4);
+  ctx.strokeStyle = "#222";
+  ctx.strokeText("무음모드ON", WIDTH/2, HEIGHT/2);
+  ctx.fillText("무음모드ON", WIDTH/2, HEIGHT/2);
+  ctx.font = `bold ${Math.floor(scaleV(22))}px sans-serif`;
+  bombEffect.enemies.forEach(e => {
+    ctx.save();
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#e00";
+    ctx.font = `bold ${Math.floor(scaleV(18))}px sans-serif`;
+    ctx.fillText("쨍그랑!", e.crackX + e.size/2, e.crackY - scaleV(18));
+    ctx.restore();
+  });
+  ctx.restore();
+}
+
+function drawUI() {
+  ctx.save();
+  ctx.font = `${Math.floor(scaleV(18))}px sans-serif`;
+  ctx.fillStyle = 'white';
+  ctx.fillText(`절주력: ${sobriety}`, scaleX(10), scaleY(24));
+  let heartSize = scaleV(22);
+  for (let i=0; i<lives; ++i)
+    drawHeart(WIDTH-(heartSize+scaleX(10))*(i+1), scaleY(18), heartSize, RED);
+  ctx.restore();
+}
+function drawGameOver() {
+  ctx.save();
+  const mainFontSize = Math.floor(scaleV(48));
+  const msg = "과음하셨습니다";
+  ctx.font = `bold ${mainFontSize}px sans-serif`;
+  ctx.textAlign = "center";
+  const warningFontSize = Math.max(4, Math.floor(mainFontSize / 5));
+  const warningLine1 = "지나친 음주는 뇌 기능 저하, 우울증, 심혈관 질환, 간 손상, 위염, 췌장염 등을 유발하며,";
+  const warningLine2 = "구강암과 간암 등 각종 암의 발생 위험도 높입니다.";
+  const textWidth = Math.max(
+    ctx.measureText(msg).width,
+    ctx.measureText(warningLine1).width,
+    ctx.measureText(warningLine2).width
+  );
+  const boxPadding = scaleV(32);
+  const boxHeight = mainFontSize + warningFontSize * 3.4 + boxPadding;
+  const boxY = HEIGHT/2 - mainFontSize/2 - scaleV(10);
+  ctx.fillStyle = "rgba(255,255,255,0.92)";
+  ctx.fillRect(WIDTH/2 - textWidth/2 - boxPadding/2, boxY, textWidth + boxPadding, boxHeight);
+  ctx.fillStyle = "#c00";
+  ctx.font = `bold ${mainFontSize}px sans-serif`;
+  ctx.fillText(msg, WIDTH/2, HEIGHT/2 + scaleV(16));
+  ctx.font = `normal ${warningFontSize}px sans-serif`;
+  ctx.fillStyle = "#800";
+  const startY = HEIGHT/2 + mainFontSize * 0.9;
+  ctx.fillText(warningLine1, WIDTH/2, startY);
+  ctx.fillText(warningLine2, WIDTH/2, startY + warningFontSize * 1.3);
+  ctx.restore();
+}
+const joystickBase = document.getElementById('joystick-base');
+const joystickKnob = document.getElementById('joystick-knob');
+let joyDragging = false, joyCenterX = 0, joyCenterY = 0;
+let joyNormX = 0, joyNormY = 0;
+function resetJoystick() {
+  const baseRect = joystickBase.getBoundingClientRect();
+  const knobRect = joystickKnob.getBoundingClientRect();
+  joystickKnob.style.left = (baseRect.width/2 - knobRect.width/2) + 'px';
+  joystickKnob.style.top = (baseRect.height/2 - knobRect.height/2) + 'px';
+  joyNormX = 0; joyNormY = 0;
+}
+window.addEventListener('resize', resetJoystick);
+window.addEventListener('DOMContentLoaded', resetJoystick);
+joystickBase.addEventListener('touchstart', e => {
+  joyDragging = true;
+  const rect = joystickBase.getBoundingClientRect();
+  joyCenterX = rect.left + rect.width / 2;
+  joyCenterY = rect.top + rect.height / 2;
+  e.preventDefault();
+});
+joystickBase.addEventListener('touchmove', e => {
+  if (!joyDragging) return;
+  const t = e.touches[0];
+  let dx = t.clientX - joyCenterX;
+  let dy = t.clientY - joyCenterY;
+  const maxD = joystickBase.offsetWidth / 2;
+  const dist = Math.min(Math.sqrt(dx*dx + dy*dy), maxD);
+  const angle = Math.atan2(dy, dx);
+  const knobW = joystickKnob.offsetWidth, knobH = joystickKnob.offsetHeight;
+  joystickKnob.style.left = (maxD + dist * Math.cos(angle) - knobW/2) + 'px';
+  joystickKnob.style.top = (maxD + dist * Math.sin(angle) - knobH/2) + 'px';
+  joyNormX = (dist * Math.cos(angle)) / maxD;
+  joyNormY = (dist * Math.sin(angle)) / maxD;
+  e.preventDefault();
+});
+joystickBase.addEventListener('touchend', e => {
+  joyDragging = false;
+  resetJoystick();
+  e.preventDefault();
+});
+joystickBase.addEventListener('touchcancel', e => {
+  joyDragging = false;
+  resetJoystick();
+  e.preventDefault();
+});
+joystickBase.addEventListener('mousedown', e => {
+  joyDragging = true;
+  const rect = joystickBase.getBoundingClientRect();
+  joyCenterX = rect.left + rect.width / 2;
+  joyCenterY = rect.top + rect.height / 2;
+  e.preventDefault();
+});
+window.addEventListener('mousemove', e => {
+  if (!joyDragging) return;
+  let dx = e.clientX - joyCenterX;
+  let dy = e.clientY - joyCenterY;
+  const maxD = joystickBase.offsetWidth / 2;
+  const dist = Math.min(Math.sqrt(dx*dx + dy*dy), maxD);
+  const angle = Math.atan2(dy, dx);
+  const knobW = joystickKnob.offsetWidth, knobH = joystickKnob.offsetHeight;
+  joystickKnob.style.left = (maxD + dist * Math.cos(angle) - knobW/2) + 'px';
+  joystickKnob.style.top = (maxD + dist * Math.sin(angle) - knobH/2) + 'px';
+  joyNormX = (dist * Math.cos(angle)) / maxD;
+  joyNormY = (dist * Math.sin(angle)) / maxD;
+});
+window.addEventListener('mouseup', e => {
+  if (joyDragging) {
+    joyDragging = false;
+    resetJoystick();
+  }
+});
+// 적 생성량 조절 함수 (0~4000: sobriety=2000 기준 고정, 4000~: 1/4 감소)
+function get_spawn_chance(sobriety) {
+  if (sobriety <= 4000) {
+    const fixed_sobriety = 2000;
+    let sc = Math.max(minSpawnChance, spawnChance_init - spawnDecrease * fixed_sobriety);
+    return sc;
+  } else {
+    let sc_at_4000 = Math.max(minSpawnChance, spawnChance_init - spawnDecrease * 4000);
+    let elapsed = sobriety - 4000;
+    let sc = Math.max(minSpawnChance, sc_at_4000 - spawnDecrease * elapsed);
+    return sc * 4;
+  }
+}
+document.addEventListener('keydown', e => keys[e.key]=true);
+document.addEventListener('keyup', e => keys[e.key]=false);
+function update() {
+  if (gameOver) {
+    bgm.pause();
+    return;
+  }
+  if (bombEffect) {
+    if (Date.now() - bombEffect.time > bombEffect.duration) {
+      bombEffect = null;
+      enemies = [];
+    }
+    return;
+  }
+  let dx = joyNormX * 1.0;
+  let dy = joyNormY * 1.0;
+  if (dx === 0 && dy === 0) {
+    dx = (keys['ArrowLeft']?-1:0) + (keys['ArrowRight']?1:0);
+    dy = (keys['ArrowUp']?-1:0) + (keys['ArrowDown']?1:0);
+  }
+  ladybug.x += dx * ladybug.speed;
+  ladybug.y += dy * ladybug.speed;
+  ladybug.x = Math.max(0, Math.min(WIDTH - ladybug.size, ladybug.x));
+  ladybug.y = Math.max(0, Math.min(HEIGHT - ladybug.size * 2, ladybug.y));
+  let currentSpawnChance = get_spawn_chance(sobriety);
+  if (Math.random() < 1/currentSpawnChance) enemies.push(newEnemy());
+  let itemSpawnRate = itemSpawnRateInit + Math.max(0, Math.min(sobriety, 4000)) * itemSpawnRateIncrease;
+  if (Math.random() < itemSpawnRate) items.push(newItem());
+  moveEnemies();
+  moveItems();
+  checkCollisions();
+  if (shield && Date.now() - shieldTimer > 10000) shield = false;
+  sobriety++;
+}
+function render() {
+  let shakeX = getShakeOffset();
+  if (shakeX !== 0) { ctx.save(); ctx.translate(shakeX, 0); }
+  if (backgroundImg.complete) ctx.drawImage(backgroundImg, 0, 0, WIDTH, HEIGHT);
+  else ctx.clearRect(0,0,WIDTH,HEIGHT);
+  drawLadybug();
+  enemies.forEach(drawEnemy);
+  items.forEach(drawItem);
+  drawBomb2Anim();
+  drawUI();
+  if (bombEffect) drawBombEffect();
+  if (gameOver) drawGameOver();
+  if (shakeX !== 0) ctx.restore();
+}
+function loop() {
+  update();
+  render();
+  if (!gameOver) requestAnimationFrame(loop);
+}
+window.addEventListener('DOMContentLoaded', () => {
+  resetJoystick();
+  loop();
+});
+</script>
+</body>
+</html>
